@@ -941,7 +941,7 @@ class PilotCoordinator(DataUpdateCoordinator):
 
     def _battery_line(self, d: dict) -> str:
         """Home battery: how long it lasts at the current draw down to the
-        reserve, and when the PV starts (or ends, during the PV day)."""
+        reserve, and at night whether that is enough until the PV start."""
         now = dt_util.now()
         soc = d["akku_soc"]
         reserve = float(self.cfg.get(CONF_BATTERY_MIN_SOC, DEFAULT_BATTERY_MIN_SOC))
@@ -952,22 +952,15 @@ class PilotCoordinator(DataUpdateCoordinator):
         def num(v: float) -> str:
             return f"{v:.1f}".replace(".", ",")
 
-        def until(t: datetime) -> str:
-            return f"in {num(max(0.0, (t - now).total_seconds() / 3600))} h ({t.strftime('%H:%M')})"
-
-        # during the PV day the next solar start is tomorrow, after the PV end
-        pv_day = now < end < start
+        # solar start / PV end are in the dashboard footer: only the verdict here
         txt = f"Hausakku {soc:.0f} %"
         drain = self._battery_drain_kw
         if drain is None or drain < 0.05:
-            if drain is not None and drain < -0.05:
-                txt += " — wird geladen"
-            return txt + (f" · PV-Ende {until(end)}" if pv_day else f" · PV-Start {until(start)}")
+            return txt + (" — wird geladen" if drain is not None and drain < -0.05 else "")
         last_h = max(0.0, (soc - reserve) / 100.0 * cap) / drain
         empty = now + timedelta(hours=last_h)
         txt += (f": reicht noch {num(last_h)} h bis {reserve:.0f} % (~{empty.strftime('%H:%M')}, "
                 f"bei {self._kw(drain)})")
-        if pv_day:
-            return txt + f" · PV-Ende {until(end)}"
-        txt += f" · PV-Start {until(start)}"
+        if now < end < start:   # PV day: the next solar start is tomorrow
+            return txt
         return txt + (" ✅" if empty >= start else " ⚠️ reicht nicht bis PV-Start")
