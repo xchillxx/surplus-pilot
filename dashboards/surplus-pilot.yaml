@@ -89,7 +89,7 @@ views:
               {% else %}No departure planned{% endif %}
 
               {% set lp = state_attr(c, 'ladeplan') %}
-              {% if lp is not none %}**🔌 Planned grid charging** (if the PV isn't enough){% if not state_attr(c, 'da') %} — once plugged in{% endif %}:
+              {% if lp is not none and state_attr(c, 'soc') is not none %}**🔌 Planned grid charging** (if the PV isn't enough){% if not state_attr(c, 'da') %} — once plugged in{% endif %}:
               {% for w in lp %}
               - {{ '🎯 Departure target' if w.art == 'abfahrt' else '💶 Cheap up to' }} {{ w.ziel_soc }} %:
               {%- if w.start %} {% set a = as_datetime(w.start) | as_local %}{% set b = as_datetime(w.ende) | as_local %}**{{ a.strftime('%a %H:%M') }}–{{ b.strftime('%H:%M') }}**{% if w.laeuft %} (running){% endif %} · {{ w.kwh }} kWh{% if w.preis_ct is not none %} · avg {{ w.preis_ct }} ct{% if w.geschaetzt %} (partly estimated){% endif %}{% endif %}
