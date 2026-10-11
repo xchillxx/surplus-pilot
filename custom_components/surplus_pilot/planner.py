@@ -748,7 +748,10 @@ def make_plan(inp: Inputs) -> Plan:
         if surplus > MUST_MIN_SURPLUS_KW:
             must_kw = min(car.max_kw, need_kwh / max(pv_h, MIN_HOURS_LEFT))
         uncovered = max(0.0, need_kwh - pv_before)
-        if uncovered > 0 and inp.allow_grid_for_car and surplus < car.min_kw:
+        # also with PV surplus: the forecast already says PV alone won't make it,
+        # the cheapest block may be now (11.10. live: 13:15, 4.4 kW surplus, 16 kWh
+        # missing for 16:30 - the car ran on PV only and would have missed the target)
+        if uncovered > 0 and inp.allow_grid_for_car:
             grid, blk = _grid_slot_now(inp, dep, uncovered, car.max_kw)
             block = _span(blk)
 

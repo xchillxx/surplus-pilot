@@ -530,3 +530,19 @@ def test_battery_reason_names_when_the_battery_would_be_empty():
     dec = plan.devices["miner"]
     assert dec.reason == "akku_reicht_nicht"
     assert abs((dec.battery_empty - now.replace(hour=8, minute=5)).total_seconds()) < 5 * 60
+
+
+def test_departure_grid_block_also_runs_with_pv_surplus():
+    """11.10. live 13:15: departure 16:30 at 90 %, car 61 %, 16 kWh not
+    expected from PV, cheapest block 13:15-14:45 - but the car charged on
+    the PV surplus only (4.4 kW > minimum), the grid block never started."""
+    now = datetime(2026, 10, 11, 13, 15, tzinfo=TZ)
+    day0 = now.replace(hour=0)
+    prices = [P.PriceSlot(day0 + timedelta(minutes=15 * i), day0 + timedelta(minutes=15 * (i + 1)),
+                          0.188 if 52 <= i < 60 else 0.23) for i in range(96)]
+    inp = _oct10(now, pv_kw=5.3, battery_soc=21.0, car_soc=61.0, prices=prices, price_now=0.188, scale=0.5)
+    inp.base_kw = 0.89
+    inp.departures[0].target_soc = 90.0
+    plan = P.make_plan(inp)
+    assert plan.uncovered_kwh > 5
+    assert plan.car_grid and plan.car_reason == "netz_pflicht" and plan.car_kw == 11.04
