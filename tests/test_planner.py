@@ -517,3 +517,16 @@ def test_charge_windows_show_the_planned_grid_charging_ahead():
     # target already reached -> nothing planned
     car.soc = 55.0
     assert P.charge_windows(base_inputs(now, car=car, departures=[dep], prices=prices)) == []
+
+
+def test_battery_reason_names_when_the_battery_would_be_empty():
+    """11.10. live 03:56: battery 31 %, 13.8 kWh, night base 0.39 kW, miner
+    0.142 kW -> 2.2 kWh / 0.53 kW: empty ~08:06, needed until 10:09."""
+    now = datetime(2026, 10, 11, 3, 56, tzinfo=TZ)
+    m = miner()
+    m.decision_kw = 0.142
+    plan = P.make_plan(base_inputs(now, battery_soc=31.0, battery_capacity_kwh=13.8, night_base_kw=0.39,
+                                   devices=[m]))
+    dec = plan.devices["miner"]
+    assert dec.reason == "akku_reicht_nicht"
+    assert abs((dec.battery_empty - now.replace(hour=8, minute=5)).total_seconds()) < 5 * 60

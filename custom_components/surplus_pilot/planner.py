@@ -157,6 +157,7 @@ class DeviceDecision:
     on: bool
     reason: str
     path: str = ""   # "ueberschuss" | "akku" | "pflicht" | ""
+    battery_empty: datetime | None = None   # akku_reicht_nicht: home battery at its reserve with this device
 
 
 @dataclass
@@ -334,6 +335,25 @@ def battery_lasts(inp: Inputs, planned_on: dict[str, bool], extra: DeviceInput |
                 hh = max(0.0, min(h, (d.window_end - inp.now).total_seconds() / 3600.0))
             load += d.decision_kw * hh
     return avail >= load
+
+
+def battery_empty_at(inp: Inputs, planned_on: dict[str, bool], extra: DeviceInput) -> datetime | None:
+    """When the home battery would reach its reserve with the same load as
+    battery_lasts (night base load + planned devices + this one, each until
+    its window end) - the reason's "why" in one time."""
+    if inp.battery_soc is None:
+        return None
+    left = max(0.0, (inp.battery_soc - inp.battery_min_soc) / 100.0 * inp.battery_capacity_kwh)
+    devs = [d for d in inp.devices if planned_on.get(d.id) or d.id == extra.id]
+    t, step = inp.now, timedelta(minutes=5)
+    for _ in range(24 * 12):
+        kw = inp.night_base_kw + sum(d.decision_kw for d in devs if d.window_end is None or d.window_end > t)
+        use = kw * step.total_seconds() / 3600.0
+        if use >= left:
+            return t + step * (left / use)
+        left -= use
+        t += step
+    return None
 
 
 def _hours(inp: Inputs, t: datetime) -> float:
@@ -874,7 +894,8 @@ def _devices(inp: Inputs, remaining: float,
             reason = "kein_ueberschuss"
         else:
             reason = "akku_reicht_nicht"
-        out[d.id] = DeviceDecision(False, reason)
+        empty = battery_empty_at(inp, planned, d) if reason == "akku_reicht_nicht" else None
+        out[d.id] = DeviceDecision(False, reason, battery_empty=empty)
     return out
 
 

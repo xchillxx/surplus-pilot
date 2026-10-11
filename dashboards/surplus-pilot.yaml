@@ -138,7 +138,7 @@ views:
             content: |
               | Device | | Reason | Runtime today | Power |
               |---|---|---|---|---|
-              {% for e in integration_entities('surplus_pilot') | sort if e.startswith('sensor.') and state_attr(e, 'laufzeit_heute_h') is not none %}{% set a = states[e].attributes %}| **{{ a.name }}** | {{ '🟢 on' if a.an else '⚪ off' }}{% if a.schaltet_in_s %} → {{ 'on' if a.soll_an else 'off' }} in {{ (a.schaltet_in_s / 60) | round(0) | int }} min{% endif %} | {{ state_translated(e) }} | {{ a.laufzeit_heute_h | round(1) }} h | {{ a.leistung_kw | round(2) }} kW |
+              {% for e in integration_entities('surplus_pilot') | sort if e.startswith('sensor.') and state_attr(e, 'laufzeit_heute_h') is not none %}{% set a = states[e].attributes %}| **{{ a.name }}** | {{ '🟢 on' if a.an else '⚪ off' }}{% if a.schaltet_in_s %} → {{ 'on' if a.soll_an else 'off' }} in {{ (a.schaltet_in_s / 60) | round(0) | int }} min{% endif %} | {{ state_translated(e) }}{% if a.akku_leer_um %} · empty ~{{ (as_datetime(a.akku_leer_um) | as_local).strftime('%H:%M') }}{% endif %} | {{ a.laufzeit_heute_h | round(1) }} h | {{ a.leistung_kw | round(2) }} kW |
               {% endfor %}
           # one tile per device: Off = Surplus Pilot leaves the device alone
           - type: tile

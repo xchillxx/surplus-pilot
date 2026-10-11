@@ -930,6 +930,11 @@ class PilotCoordinator(DataUpdateCoordinator):
             if not dec.on and fp.get("start") is not None and fp.get("need_h", 0) > 0:
                 extra += (f" — Mindestlaufzeit: fehlen {fp['need_h']:.1f} h, Pflichtlauf ab "
                           f"{dt_util.as_local(fp['start']).strftime('%H:%M')}").replace(".", ",")
+            if dec.battery_empty is not None:
+                need = dt_util.as_local(dt_util.parse_datetime(d["solar_start"])) + timedelta(
+                    hours=P.BATTERY_PATH_BUFFER_H)
+                extra += (f" (damit leer ~{dt_util.as_local(dec.battery_empty).strftime('%H:%M')}, "
+                          f"nötig bis {need.strftime('%H:%M')})")
             lines.append(f"{names.get(did, did)}: {'an' if dec.on else 'aus'} — "
                          f"{REASON_TEXT.get(dec.reason, dec.reason)}{extra}")
         return lines

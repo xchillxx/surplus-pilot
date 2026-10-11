@@ -224,6 +224,7 @@ class DeviceSensor(PilotEntity, SensorEntity):
             "mindestlauf_ab": co.forced_run_start(did),
             "leistung_kw": co._decision_kw(self._dev),
             "name": self._dev.get(CONF_DEV_NAME),
+            "akku_leer_um": dec.battery_empty.isoformat() if dec and dec.battery_empty else None,
         }
 
 
