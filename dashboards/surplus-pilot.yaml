@@ -88,6 +88,18 @@ views:
               {%- else %} · ✅ reached{% endif %}
               {% else %}No departure planned{% endif %}
 
+              {% set lp = state_attr(c, 'ladeplan') %}
+              {% if lp is not none %}**🔌 Planned grid charging** (if the PV isn't enough){% if not state_attr(c, 'da') %} — once plugged in{% endif %}:
+              {% for w in lp %}
+              - {{ '🎯 Departure target' if w.art == 'abfahrt' else '💶 Cheap up to' }} {{ w.ziel_soc }} %:
+              {%- if w.start %} {% set a = as_datetime(w.start) | as_local %}{% set b = as_datetime(w.ende) | as_local %}**{{ a.strftime('%a %H:%M') }}–{{ b.strftime('%H:%M') }}**{% if w.laeuft %} (running){% endif %} · {{ w.kwh }} kWh{% if w.preis_ct is not none %} · avg {{ w.preis_ct }} ct{% if w.geschaetzt %} (partly estimated){% endif %}{% endif %}
+              {%- elif w.spaetestens %} no prices yet — starts {{ (as_datetime(w.spaetestens) | as_local).strftime('%H:%M') }} at the latest · {{ w.kwh }} kWh
+              {%- else %} {{ w.kwh }} kWh missing, no slot below the cheap threshold yet{% endif %}
+              {% else %}
+              - ✅ nothing from the grid — the PV forecast is enough
+              {% endfor %}
+              {% endif %}
+
               {% if state_attr(c, 'vorrang_vor_geraeten') %}⚡ Charges **before** the devices: no PV chance for the car tomorrow.{% endif %}
 
               <small>Last action: {{ state_attr(c, 'aktion') }} · commands today: {{ state_attr(c, 'befehle_heute') }}</small>

@@ -183,6 +183,8 @@ class PilotCoordinator(DataUpdateCoordinator):
         self._forced_plan: dict[str, dict] = {}        # device -> planned forced run (status)
         self.device_plan: P.Plan | None = None
         self.car_plan: P.Plan | None = None
+        self.charge_windows: list[P.ChargeWindow] = []
+        self._battery_drain_kw: float | None = None
         self.status: dict = {}
 
     def async_watch_car(self):
@@ -708,6 +710,7 @@ class PilotCoordinator(DataUpdateCoordinator):
                                                     statistics.median(s[2] for s in win_cap), None))
                         plan = P.cap_car_topup(plan, recent.car_kw, self.car.min_kw)
                     self.car_plan = plan
+                    self.charge_windows = P.charge_windows(probe)
                     self.car.decide(now, self.car_plan, charging, forced)
                     self._car_slot = slot
                     self._dep_sig = dep_sig
@@ -736,6 +739,9 @@ class PilotCoordinator(DataUpdateCoordinator):
             # follows at its next decision (only the obligation stays fixed)
             car_fixed = min(car5, cp.car_must_kw)
         self.device_plan = P.make_plan(inputs(pv5, base5, car_fixed))
+        # what the home battery has to deliver right now (5-min median): house
+        # and running devices beyond the PV, the car only when it feeds it
+        self._battery_drain_kw = base5 + sum(dev_kw.values()) + (car5 if feeds_car else 0.0) - pv5
         await self._apply_devices(now, dev_on)
         self._persist_runtime_state()
         self.store.save()
@@ -915,13 +921,7 @@ class PilotCoordinator(DataUpdateCoordinator):
                     txt += f" — Netz-Block geplant {a}–{b} (Geräte richten sich danach)"
                 lines.append(txt)
         if d.get("akku_soc") is not None:
-            mode = {"abfahrt": "Abfahrt eingerechnet: nach der Abfahrt lädt PV den Akku allein",
-                    "frist": "voll bis PV-Ende", "voll": "Akku voll", "kein_akku": ""}.get(d.get("akku_ziel_modus"), "")
-            feed = "entlädt ins Auto" if d.get("akku_speist_auto") else "entlädt nicht ins Auto"
-            seen = d.get("akku_speist_auto_erkannt")
-            if seen and self.cfg.get(CONF_BATTERY_POWER_SENSOR):
-                feed += f", zuletzt gesehen {dt_util.as_local(dt_util.parse_datetime(seen)).strftime('%d.%m. %H:%M')}"
-            lines.append(f"Hausakku {d['akku_soc']:.0f} %: reserviert {self._kw(d['akku_ziel_kw'])} ({mode}) — {feed}")
+            lines.append(self._battery_line(d))
         names = {x[CONF_DEV_ID]: x.get(CONF_DEV_NAME) for x in self.devices}
         for did, dec in dp.devices.items():
             cd = self.countdown_s(did)
@@ -933,3 +933,36 @@ class PilotCoordinator(DataUpdateCoordinator):
             lines.append(f"{names.get(did, did)}: {'an' if dec.on else 'aus'} — "
                          f"{REASON_TEXT.get(dec.reason, dec.reason)}{extra}")
         return lines
+
+    def _battery_line(self, d: dict) -> str:
+        """Home battery: how long it lasts at the current draw down to the
+        reserve, and when the PV starts (or ends, during the PV day)."""
+        now = dt_util.now()
+        soc = d["akku_soc"]
+        reserve = float(self.cfg.get(CONF_BATTERY_MIN_SOC, DEFAULT_BATTERY_MIN_SOC))
+        cap = float(self.cfg.get(CONF_BATTERY_CAPACITY_KWH, DEFAULT_BATTERY_CAPACITY_KWH))
+        start = dt_util.as_local(dt_util.parse_datetime(d["solar_start"]))
+        end = dt_util.as_local(dt_util.parse_datetime(d["pv_ende"]))
+
+        def num(v: float) -> str:
+            return f"{v:.1f}".replace(".", ",")
+
+        def until(t: datetime) -> str:
+            return f"in {num(max(0.0, (t - now).total_seconds() / 3600))} h ({t.strftime('%H:%M')})"
+
+        # during the PV day the next solar start is tomorrow, after the PV end
+        pv_day = now < end < start
+        txt = f"Hausakku {soc:.0f} %"
+        drain = self._battery_drain_kw
+        if drain is None or drain < 0.05:
+            if drain is not None and drain < -0.05:
+                txt += " — wird geladen"
+            return txt + (f" · PV-Ende {until(end)}" if pv_day else f" · PV-Start {until(start)}")
+        last_h = max(0.0, (soc - reserve) / 100.0 * cap) / drain
+        empty = now + timedelta(hours=last_h)
+        txt += (f": reicht noch {num(last_h)} h bis {reserve:.0f} % (~{empty.strftime('%H:%M')}, "
+                f"bei {self._kw(drain)})")
+        if pv_day:
+            return txt + f" · PV-Ende {until(end)}"
+        txt += f" · PV-Start {until(start)}"
+        return txt + (" ✅" if empty >= start else " ⚠️ reicht nicht bis PV-Start")

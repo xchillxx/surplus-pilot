@@ -178,6 +178,14 @@ class CarSensor(PilotEntity, SensorEntity):
             "vorrang_vor_geraeten": cp.car_first if cp else None,
             "soc": d.get("auto_soc"), "limit": d.get("auto_limit"), "da": d.get("auto_da"),
             "laedt": d.get("auto_laedt"),
+            # planned grid charging if the PV forecast isn't enough (also while unplugged)
+            "ladeplan": [{
+                "art": w.kind, "ziel_soc": round(w.target_soc), "kwh": round(w.kwh, 1),
+                "start": w.start.isoformat() if w.start else None, "ende": w.end.isoformat() if w.end else None,
+                "preis_ct": round(w.price * 100, 1) if w.price is not None else None,
+                "geschaetzt": w.estimated, "laeuft": w.running,
+                "spaetestens": w.latest.isoformat() if w.latest else None,
+            } for w in self.coordinator.charge_windows],
         }
 
 

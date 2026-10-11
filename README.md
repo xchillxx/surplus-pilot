@@ -188,7 +188,7 @@ Entity IDs are created in the language Home Assistant runs in at setup
 | *Operating mode* (`select`) | Automatic / Observe only / Off |
 | *Status* (`sensor`) | One-line summary; attribute `erklaerung` explains every decision in plain words |
 | PV power, Base load, Surplus, Battery reservation, Device budget, Forecast rest of today, Forecast tomorrow, Next departure, Last action (`sensor`) | What the plan sees and does; *Last action* keeps a log of the last 60 actions |
-| Car: *Charging status*, *Charging power* (`sensor`) | Why the car charges (or not), target current, commands today |
+| Car: *Charging status*, *Charging power* (`sensor`) | Why the car charges (or not), target current, commands today; attribute `ladeplan` lists the planned grid charging (departure target / cheap top-up) with time, kWh and mean price — also while the car is unplugged |
 | Car: *Charging control* (`switch`) | Car control on/off |
 | Car: *Cheap charging* (`switch`), *Cheap threshold percentile*, *Cheap charging up to*, *Cheap charging with PV from home battery* (`number`) | Cheap charging on/off, threshold percentile, target, home-battery minimum for cheap charging in PV hours |
 | Car: *Cheap threshold*, *Price now* (`sensor`) | Threshold and current price in ct/kWh |

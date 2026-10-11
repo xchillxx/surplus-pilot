@@ -492,3 +492,28 @@ def test_cheap_topup_with_pv_below_the_battery_value_when_the_forecast_fills_it_
     inp, p = plan(3.0, battery=20.0)        # running block below 45 %: no stop while the forecast covers it
     inp.grid_running = True
     assert not P.cheap_pv_battery_stop(inp)
+
+
+def test_charge_windows_show_the_planned_grid_charging_ahead():
+    """Dashboard: the departure block and the cheap block are shown before
+    they start - also with the car unplugged - with their mean price; without
+    any need from the grid there is no window."""
+    now = datetime(2026, 10, 6, 1, 0, tzinfo=TZ)
+    dep = P.Departure(start=now.replace(hour=4, minute=30), target_soc=50.0, name="Frühschicht")
+    car = P.CarInput(present=False, soc=35.0, limit_soc=80.0, capacity_kwh=72.9, efficiency=0.9, min_kw=3.45,
+                     max_kw=11.04)
+    prices = [P.PriceSlot(now + timedelta(minutes=15 * i), now + timedelta(minutes=15 * (i + 1)),
+                          0.30 if i < 8 else 0.20) for i in range(16)]
+    ws = P.charge_windows(base_inputs(now, car=car, departures=[dep], prices=prices))
+    assert [w.kind for w in ws] == ["abfahrt"]
+    w = ws[0]
+    assert w.kwh > 10 and not w.running and w.start >= now.replace(hour=3) and w.end <= dep.start
+    assert abs(w.price - 0.20) < 1e-9 and not w.estimated
+    # cheap top-up to 80 % below the threshold: second window
+    ws = P.charge_windows(base_inputs(now, car=car, departures=[dep], prices=prices, battery_soc=15.0,
+                                      cheap_threshold=0.25, cheap_target_soc=80.0, price_now=0.30))
+    assert [w.kind for w in ws] == ["abfahrt", "billig"] and ws[1].target_soc == 80.0
+    assert ws[1].start >= now.replace(hour=3) and abs(ws[1].price - 0.20) < 1e-9
+    # target already reached -> nothing planned
+    car.soc = 55.0
+    assert P.charge_windows(base_inputs(now, car=car, departures=[dep], prices=prices)) == []
