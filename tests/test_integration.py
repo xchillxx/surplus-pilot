@@ -343,3 +343,38 @@ async def test_battery_feeding_the_car_is_detected_and_followed(hass: HomeAssist
     await hass.async_block_till_done()
     co = hass.data[DOMAIN][entry.entry_id]
     assert co.battery_feeds_car(dt_util.now()) is False
+
+
+async def test_grid_charging_ends_within_the_quarter_hour(hass: HomeAssistant, freezer):
+    """11.10. live: 1.6 kWh left at 15:16, the grid block ran at 11 kW until
+    15:30. The end is checked every minute, on a SoC estimated from the
+    wallbox between the car's ~10-min reports."""
+    freezer.move_to("2026-10-07 09:01:00+00:00")
+    set_world(hass, pv=0.5, load=0.6, soc=50, car_soc=70)
+    for e in ("switch.car_charge", "switch.miner", "switch.pump", "climate.pool"):
+        hass.states.async_set(e, "off")
+    entry = MockConfigEntry(domain=DOMAIN, data=DATA)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    for dom, srv in (("switch", "turn_on"), ("switch", "turn_off"), ("number", "set_value"),
+                     ("climate", "set_hvac_mode")):
+        hass.services.async_register(dom, srv, lambda call: None)
+    co = hass.data[DOMAIN][entry.entry_id]
+    soon = dt_util.now() + timedelta(minutes=20)
+    co.store.data["oneoff"] = {"enabled": True, "name": "Einmalig", "target_soc": 75, "time": soon.strftime("%H:%M"),
+                               "away_h": 0.0, "start_date": soon.date().isoformat()}
+    freezer.tick(timedelta(seconds=20))
+    await co.async_refresh()
+    assert co.car.decision.grid
+    started = co.car.decision.time
+    # the car charges at 11 kW, its SoC report stays at 74 %
+    for _ in range(7):
+        freezer.tick(timedelta(minutes=1))
+        set_world(hass, pv=0.5, load=11.6, soc=50, car_soc=74, car_kw=11.0)
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+    assert not co.car.decision.grid
+    assert co.car.decision.time > started
+    assert dt_util.as_local(co.car.decision.time).minute < 15   # same quarter hour
+    assert any("Netzladen beendet" in e["text"] for e in co.log)

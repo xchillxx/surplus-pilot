@@ -99,6 +99,10 @@ battery reserve.
 - Plugging in, a changed departure or a wallbox mode change trigger a new car
   decision right away — a car that starts charging by itself after plug-in is
   stopped within seconds.
+- Grid charging ends within the minute once the rest is covered, not at the
+  next quarter hour (at 11 kW a quarter hour is 2.75 kWh). Between the car's
+  SoC reports (often only every ~10 min, in whole percent) the SoC is
+  estimated from what the wallbox delivered.
 - Devices are re-planned every minute on a 5-minute median and switch only
   after the decision held for 10 minutes (20 for thermostats). A device that
   depends on another one goes off together with it.

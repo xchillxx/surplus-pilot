@@ -171,6 +171,7 @@ class PilotCoordinator(DataUpdateCoordinator):
         self._prices: list[P.PriceSlot] = []
         self._prices_at: datetime | None = None
         self._car_slot = None
+        self._soc_track: tuple[float, datetime, float] | None = None   # (reported SoC, last cycle, kWh since)
         self._calib_try: datetime | None = None
         self._price_stats: dict = {}
         self._last_plugged: bool | None = None
@@ -590,9 +591,11 @@ class PilotCoordinator(DataUpdateCoordinator):
                 car_soc = number(self.hass, c.get(CONF_CAR_SOC_FALLBACK))
             limit = number(self.hass, c.get(CONF_CAR_LIMIT_ENTITY)) or float(
                 c.get(CONF_CAR_LIMIT_DEFAULT, DEFAULT_CAR_LIMIT))
+            cap = float(c.get(CONF_CAR_CAPACITY_KWH, DEFAULT_CAR_CAPACITY_KWH))
+            eff = float(c.get(CONF_CAR_EFFICIENCY, DEFAULT_CAR_EFFICIENCY))
+            car_soc = self._car_soc_estimate(now, car_soc, car_kw if charging else 0.0, cap, eff, limit)
             car_in = P.CarInput(present=present, soc=car_soc, limit_soc=limit,
-                                capacity_kwh=float(c.get(CONF_CAR_CAPACITY_KWH, DEFAULT_CAR_CAPACITY_KWH)),
-                                efficiency=float(c.get(CONF_CAR_EFFICIENCY, DEFAULT_CAR_EFFICIENCY)),
+                                capacity_kwh=cap, efficiency=eff,
                                 min_kw=self.car.min_kw, max_kw=self.car.max_kw, current_kw=car_kw)
 
         # ---- devices: actual state + power
@@ -682,12 +685,22 @@ class PilotCoordinator(DataUpdateCoordinator):
             dep_sig = (nd.start, nd.target_soc) if nd else None
             replan = self._dep_sig is not _UNSET and dep_sig != self._dep_sig
             slot = (now.date(), now.hour, now.minute // CAR_DECISION_MINUTES)
-            if forced or replan or slot != self._car_slot:
+            due = forced or replan or slot != self._car_slot
+            # grid charging ends the minute the rest is covered, not at the next
+            # quarter hour (11.10. live: 1.6 kWh left at 15:16, 11 kW ran to 15:30)
+            grid_done = False
+            if (not due and charging and self.car.decision is not None and self.car.decision.grid
+                    and self.car_plan is not None and self.car_plan.car_grid):
+                win = [s for s in self.samples if (now - s[0]).total_seconds() <= CAR_AVERAGE_MINUTES * 60]
+                if win:
+                    probe = inputs(sum(s[1] for s in win) / len(win), statistics.median(s[2] for s in win), None)
+                    grid_done = not P.make_plan(probe).car_grid
+            if due or grid_done:
                 win = [s for s in self.samples if (now - s[0]).total_seconds() <= CAR_AVERAGE_MINUTES * 60]
                 covered = (win[-1][0] - win[0][0]).total_seconds() / 60 if len(win) > 1 else 0
                 # a departure within 2 h doesn't wait for 10 min of readings
                 urgent = nd is not None and nd.start - now <= timedelta(hours=URGENT_DEPARTURE_H)
-                if covered >= CAR_MIN_COVERAGE_MINUTES or forced or ((replan or urgent) and win):
+                if covered >= CAR_MIN_COVERAGE_MINUTES or forced or ((replan or urgent or grid_done) and win):
                     pv_m = sum(s[1] for s in win) / len(win)
                     base_m = statistics.median(s[2] for s in win)
                     probe = inputs(pv_m, base_m, None)
@@ -712,6 +725,8 @@ class PilotCoordinator(DataUpdateCoordinator):
                     self.car_plan = plan
                     self.charge_windows = P.charge_windows(probe)
                     self.car.decide(now, self.car_plan, charging, forced)
+                    if grid_done and not plan.car_grid:
+                        self._log(f"Netzladen beendet: Auto {car_in.soc:.1f} %, der Rest kommt aus PV")
                     self._car_slot = slot
                     self._dep_sig = dep_sig
             car_active = self.active and self.store.data["car_control"] and not paused and (
@@ -749,6 +764,24 @@ class PilotCoordinator(DataUpdateCoordinator):
         self.status = self._build_status(now, pv, load, base, soc, export, car_in, car_kw, charging, sun,
                                          load_stale, paused)
         return self.status
+
+    def _car_soc_estimate(self, now: datetime, reported: float | None, charge_kw: float,
+                          cap: float, eff: float, limit: float) -> float | None:
+        """The car reports its SoC only about every 10 min in whole percent
+        (at 11 kW that is ~2 %): add what the wallbox delivered since the last
+        report, so the per-minute grid end check doesn't run on an old value."""
+        if reported is None:
+            self._soc_track = None
+            return None
+        tr = self._soc_track
+        if tr is None or tr[0] != reported:
+            self._soc_track = (reported, now, 0.0)
+            return reported
+        kwh = tr[2] + max(0.0, charge_kw) * max(0.0, (now - tr[1]).total_seconds()) / 3600.0
+        self._soc_track = (reported, now, kwh)
+        # never more than a missed report or two ahead; below the limit (the car
+        # stops there itself, an estimate must not stop it early)
+        return min(reported + min(kwh * eff / cap * 100.0, 3.0), max(limit - 0.5, reported))
 
     def _decision_kw(self, d: dict) -> float:
         learned = self.store.data["learned_kw"].get(d[CONF_DEV_ID])
