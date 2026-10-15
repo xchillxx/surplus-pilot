@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # --- tuning (all validated in tools/simulate.py) ---
 FORECAST_SAFETY = 0.7          # forecast is trusted at 70 %
@@ -175,6 +175,7 @@ class Plan:
     devices: dict[str, DeviceDecision]
     budget: dict
     car_block: tuple[datetime, datetime] | None = None   # planned grid block (now or later)
+    battery: BatteryOutlook | None = None   # with all devices the plan switches on
 
 
 # ---------------------------------------------------------------- helpers
@@ -316,6 +317,87 @@ def car_pv_chance_tomorrow(inp: Inputs, car_missing_kwh: float) -> bool:
     return surplus - battery_missing >= TOMORROW_SHARE * car_missing_kwh
 
 
+@dataclass
+class BatteryOutlook:
+    """How far the home battery gets with the usual night load: the one
+    calculation behind the battery path, its reasons and the battery line
+    (12.10. live: the line used the evening draw of 0.9 kW and said "not
+    until PV start" while the miner ran on "lasts" - the night then used
+    0.55 kW and ended at 34 %)."""
+    soc: float
+    reserve_soc: float
+    usable_kwh: float           # down to the reserve
+    night_base_kw: float        # learned usual night load (house without car and devices)
+    devices_kw: float           # the counted devices now (each until its window end)
+    pv_start: datetime          # next usable PV start (sunrise + learned offset), not the sunrise
+    needed_until: datetime      # pv_start + BATTERY_PATH_BUFFER_H
+    empty_at: datetime | None   # reserve reached; None = not within BATTERY_HORIZON_H
+    lasts: bool                 # usable energy covers the load until needed_until
+
+    @property
+    def load_kw(self) -> float:
+        return self.night_base_kw + self.devices_kw
+
+    @property
+    def missing_h(self) -> float:
+        """Hours between running empty and needed_until (0 when it lasts)."""
+        if self.lasts or self.empty_at is None:
+            return 0.0
+        return max(0.0, _span_h(self.empty_at, self.needed_until))
+
+
+BATTERY_HORIZON_H = 48.0
+
+
+def _abs(t: datetime) -> datetime:
+    # aware datetimes sharing one tzinfo subtract as wall clock: across the
+    # DST change that is an hour off, so real time is counted in UTC
+    return t.astimezone(timezone.utc) if t.tzinfo is not None else t
+
+
+def _span_h(a: datetime, b: datetime) -> float:
+    return (_abs(b) - _abs(a)).total_seconds() / 3600.0
+
+
+def battery_outlook(inp: Inputs, planned_on: dict[str, bool],
+                    extra: DeviceInput | None = None) -> BatteryOutlook | None:
+    """Night base load plus the planned devices (and `extra`), each until
+    its window end, against the energy above the reserve: when the reserve
+    is reached and whether that is after solar start + buffer."""
+    if inp.battery_soc is None:
+        return None
+    now = _abs(inp.now)
+    needed = _abs(inp.solar_start) + timedelta(hours=BATTERY_PATH_BUFFER_H)
+    usable = max(0.0, (inp.battery_soc - inp.battery_min_soc) / 100.0 * inp.battery_capacity_kwh)
+    devs = [d for d in inp.devices if planned_on.get(d.id) or (extra is not None and d.id == extra.id)]
+    ends = {_abs(d.window_end) for d in devs if d.window_end is not None}
+
+    def kw_at(t: datetime) -> float:
+        return inp.night_base_kw + sum(d.decision_kw for d in devs if d.window_end is None or _abs(d.window_end) > t)
+
+    def walk(stop: datetime) -> tuple[float, datetime | None]:
+        """(kWh used until stop, instant the usable energy runs out)."""
+        used, empty, t = 0.0, None, now
+        for b in sorted(x for x in ends | {stop} if now < x <= stop):
+            kw = kw_at(t)
+            e = kw * (b - t).total_seconds() / 3600.0
+            if empty is None and kw > 0 and used + e >= usable:
+                empty = t + timedelta(hours=(usable - used) / kw)
+            used += e
+            t = b
+        return used, empty
+
+    used_needed, _ = walk(needed) if needed > now else (0.0, None)
+    _, empty = walk(now + timedelta(hours=BATTERY_HORIZON_H))
+    if empty is not None and inp.now.tzinfo is not None:
+        empty = empty.astimezone(inp.now.tzinfo)
+    return BatteryOutlook(
+        soc=inp.battery_soc, reserve_soc=inp.battery_min_soc, usable_kwh=usable,
+        night_base_kw=inp.night_base_kw, devices_kw=kw_at(now) - inp.night_base_kw,
+        pv_start=inp.solar_start, needed_until=inp.solar_start + timedelta(hours=BATTERY_PATH_BUFFER_H),
+        empty_at=empty, lasts=usable >= used_needed)
+
+
 def battery_lasts(inp: Inputs, planned_on: dict[str, bool], extra: DeviceInput | None) -> bool:
     """Battery path: would the home battery still carry the night base load
     plus all planned devices (each until its window end) until solar start
@@ -324,36 +406,7 @@ def battery_lasts(inp: Inputs, planned_on: dict[str, bool], extra: DeviceInput |
         return False
     if extra is not None and inp.battery_soc < extra.soc_reserve:
         return False
-    end = inp.solar_start + timedelta(hours=BATTERY_PATH_BUFFER_H)
-    h = max(0.0, (end - inp.now).total_seconds() / 3600.0)
-    avail = max(0.0, (inp.battery_soc - inp.battery_min_soc) / 100.0 * inp.battery_capacity_kwh)
-    load = inp.night_base_kw * h
-    for d in inp.devices:
-        if planned_on.get(d.id) or (extra is not None and d.id == extra.id):
-            hh = h
-            if d.window_end is not None:
-                hh = max(0.0, min(h, (d.window_end - inp.now).total_seconds() / 3600.0))
-            load += d.decision_kw * hh
-    return avail >= load
-
-
-def battery_empty_at(inp: Inputs, planned_on: dict[str, bool], extra: DeviceInput) -> datetime | None:
-    """When the home battery would reach its reserve with the same load as
-    battery_lasts (night base load + planned devices + this one, each until
-    its window end) - the reason's "why" in one time."""
-    if inp.battery_soc is None:
-        return None
-    left = max(0.0, (inp.battery_soc - inp.battery_min_soc) / 100.0 * inp.battery_capacity_kwh)
-    devs = [d for d in inp.devices if planned_on.get(d.id) or d.id == extra.id]
-    t, step = inp.now, timedelta(minutes=5)
-    for _ in range(24 * 12):
-        kw = inp.night_base_kw + sum(d.decision_kw for d in devs if d.window_end is None or d.window_end > t)
-        use = kw * step.total_seconds() / 3600.0
-        if use >= left:
-            return t + step * (left / use)
-        left -= use
-        t += step
-    return None
+    return battery_outlook(inp, planned_on, extra).lasts
 
 
 def _hours(inp: Inputs, t: datetime) -> float:
@@ -719,6 +772,12 @@ def charge_windows(inp: Inputs) -> list[ChargeWindow]:
 # ---------------------------------------------------------------- the plan
 
 def make_plan(inp: Inputs) -> Plan:
+    plan = _make_plan(inp)
+    on = {k: v.on for k, v in plan.devices.items()}
+    return replace(plan, battery=battery_outlook(inp, on))
+
+
+def _make_plan(inp: Inputs) -> Plan:
     surplus = inp.pv_kw - inp.base_kw
     dep = next_departure(inp.departures, inp.now)
     target_b, b_mode = battery_target_kw(inp, dep)
@@ -897,7 +956,7 @@ def _devices(inp: Inputs, remaining: float,
             reason = "kein_ueberschuss"
         else:
             reason = "akku_reicht_nicht"
-        empty = battery_empty_at(inp, planned, d) if reason == "akku_reicht_nicht" else None
+        empty = battery_outlook(inp, planned, d).empty_at if reason == "akku_reicht_nicht" else None
         out[d.id] = DeviceDecision(False, reason, battery_empty=empty)
     return out
 

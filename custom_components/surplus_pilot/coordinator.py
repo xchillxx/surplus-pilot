@@ -113,9 +113,9 @@ _LOGGER = logging.getLogger(__name__)
 REASON_TEXT = {
     "deaktiviert": "deaktiviert", "ausserhalb_zeitfenster": "außerhalb Zeitfenster",
     "wartet_auf_abhaengigkeit": "wartet auf Abhängigkeit", "mindestlaufzeit": "Mindestlaufzeit wird erzwungen",
-    "ueberschuss": "PV-Überschuss reicht", "akku_reicht": "Hausakku reicht bis Sonnenaufgang",
+    "ueberschuss": "PV-Überschuss reicht", "akku_reicht": "Hausakku reicht bis PV-Start + 1 h",
     "akku_reserve": "Hausakku unter Geräte-Reserve", "kein_ueberschuss": "kein Überschuss übrig",
-    "akku_reicht_nicht": "Hausakku würde nicht bis Sonnenaufgang reichen",
+    "akku_reicht_nicht": "Hausakku würde nicht bis PV-Start + 1 h reichen",
     "zu_kurz": "würde nur kurz laufen (PV-Ende, Zeitfenster oder Reserve zu nah)",
     "netz_pflicht": "Abfahrtsziel, aus dem Netz (günstigste Slots)",
     "netz_billig": "Strom gerade billig, PV reicht nicht", "pflicht_minimum": "Abfahrtsziel, Mindeststrom",
@@ -378,7 +378,7 @@ class PilotCoordinator(DataUpdateCoordinator):
         pv_end = sset - timedelta(hours=float(self.cfg.get(CONF_PV_END_BEFORE_SUNSET_H,
                                                             DEFAULT_PV_END_BEFORE_SUNSET_H)))
         return {"solar_start_today": ss_today, "solar_start": ss_next, "sunset": sset, "pv_end": pv_end,
-                "offset_h": off_today}
+                "offset_h": off_today, "sunrise": rise}
 
     def _read_load(self, now: datetime) -> tuple[float | None, bool]:
         """House load; a sensor that stopped reporting is held for one more
@@ -872,6 +872,8 @@ class PilotCoordinator(DataUpdateCoordinator):
             "auto_plan": cp, "naechste_abfahrt": dep,
             "solar_start": sun["solar_start"].isoformat(), "pv_ende": sun["pv_end"].isoformat(),
             "solar_offset_h": round(sun["offset_h"], 2),
+            "pv_tag": sun["solar_start_today"] <= now < sun["pv_end"] and sun["pv_end"].date() == now.date(),
+            "akku_reichweite": self._battery_outlook_attrs(now, sun),
             "prognose_rest_heute_kwh": round(fc_today, 1) if fc_today is not None else None,
             "prognose_morgen_kwh": round(fc_tomorrow, 1) if fc_tomorrow is not None else None,
             "preise_bekannt": len(self._prices),
@@ -972,28 +974,61 @@ class PilotCoordinator(DataUpdateCoordinator):
                          f"{REASON_TEXT.get(dec.reason, dec.reason)}{extra}")
         return lines
 
+    def _battery_outlook_attrs(self, now: datetime, sun: dict) -> dict | None:
+        """The planner's BatteryOutlook as diagnostic attributes: every
+        assumption behind the battery line and the battery path."""
+        o = self.device_plan.battery if self.device_plan else None
+        if o is None:
+            return None
+        iso = lambda t: dt_util.as_local(t).isoformat() if t is not None else None  # noqa: E731
+        return {
+            "soc": o.soc, "reserve_soc": o.reserve_soc, "nutzbar_kwh": round(o.usable_kwh, 2),
+            "nachtgrundlast_kw": round(o.night_base_kw, 3), "geraete_kw": round(o.devices_kw, 3),
+            "nachtlast_kw": round(o.load_kw, 3), "leer_um": iso(o.empty_at),
+            "reicht_h": round(P._span_h(now, o.empty_at), 2) if o.empty_at is not None else None,
+            "sonnenaufgang": iso(sun["sunrise"]), "pv_start": iso(o.pv_start),
+            "puffer_h": P.BATTERY_PATH_BUFFER_H, "noetig_bis": iso(o.needed_until),
+            "reicht": o.lasts, "fehlen_h": round(o.missing_h, 2),
+            "reicht_bis_pv_start": o.empty_at is None or o.empty_at >= o.pv_start,
+            "entladung_jetzt_kw": round(self._battery_drain_kw, 2) if self._battery_drain_kw is not None else None,
+        }
+
     def _battery_line(self, d: dict) -> str:
-        """Home battery: how long it lasts at the current draw down to the
-        reserve, and at night whether that is enough until the PV start."""
-        now = dt_util.now()
-        soc = d["akku_soc"]
-        reserve = float(self.cfg.get(CONF_BATTERY_MIN_SOC, DEFAULT_BATTERY_MIN_SOC))
-        cap = float(self.cfg.get(CONF_BATTERY_CAPACITY_KWH, DEFAULT_BATTERY_CAPACITY_KWH))
-        start = dt_util.as_local(dt_util.parse_datetime(d["solar_start"]))
-        end = dt_util.as_local(dt_util.parse_datetime(d["pv_ende"]))
-
-        def num(v: float) -> str:
-            return f"{v:.1f}".replace(".", ",")
-
-        # solar start / PV end are in the dashboard footer: only the verdict here
-        txt = f"Hausakku {soc:.0f} %"
+        """Home battery in one sentence from the planner's BatteryOutlook -
+        the same night load, reserve and PV start + buffer the battery path
+        decides on (v3.1.25: it used the evening draw and contradicted the
+        devices). In the PV day, with no device on the battery, only what the
+        battery does right now."""
+        txt = f"Hausakku {d['akku_soc']:.0f} %"
+        dp = self.device_plan
+        o = dp.battery if dp else None
         drain = self._battery_drain_kw
-        if drain is None or drain < 0.05:
-            return txt + (" — wird geladen" if drain is not None and drain < -0.05 else "")
-        last_h = max(0.0, (soc - reserve) / 100.0 * cap) / drain
-        empty = now + timedelta(hours=last_h)
-        txt += (f": reicht noch {num(last_h)} h bis {reserve:.0f} % (~{empty.strftime('%H:%M')}, "
-                f"bei {self._kw(drain)})")
-        if now < end < start:   # PV day: the next solar start is tomorrow
-            return txt
-        return txt + (" ✅" if empty >= start else " ⚠️ reicht nicht bis PV-Start")
+        now_txt = ""
+        if drain is not None and drain > 0.05:
+            now_txt = f"gerade {self._kw(drain)} aus dem Akku"
+        elif drain is not None and drain < -0.05:
+            now_txt = "wird gerade geladen"
+        on_battery = dp is not None and any(x.on and x.path == "akku" for x in dp.devices.values())
+        if o is None or (d.get("pv_tag") and not on_battery):
+            return txt + (f" — {now_txt}" if now_txt else "")
+
+        def hm(t: datetime) -> str:
+            return dt_util.as_local(t).strftime("%H:%M")
+
+        need = (f"nötig bis {hm(o.needed_until)} "
+                f"(PV-Start {hm(o.pv_start)} + {P.BATTERY_PATH_BUFFER_H:g} h)")
+        if o.usable_kwh <= 0:
+            txt += f": auf Reserve {o.reserve_soc:.0f} % — {need}"
+        elif o.empty_at is None:
+            txt += f": reicht bei üblicher Nachtlast {self._kw(o.load_kw)} über {P.BATTERY_HORIZON_H:g} h — {need}"
+        else:
+            txt += (f": reicht bei üblicher Nachtlast {self._kw(o.load_kw)} bis ~{hm(o.empty_at)} "
+                    f"(dann {o.reserve_soc:.0f} %) — {need}")
+        if o.lasts:
+            txt += " ✅"
+        else:
+            m = round(o.missing_h * 60)
+            txt += f", es fehlen ~{m // 60} h {m % 60:02d} min ⚠️" if m >= 60 else f", es fehlen ~{m} min ⚠️"
+        if now_txt and not (drain is not None and abs(drain - o.load_kw) < 0.2):
+            txt += f" · {now_txt}"
+        return txt

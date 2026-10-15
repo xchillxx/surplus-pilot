@@ -90,7 +90,10 @@ on dark days it is what buys the cheap hours.
 
 At night devices run on the home battery only if it lasts until the next
 solar start (+1 h) with all planned loads, and only above each device's
-battery reserve.
+battery reserve. "Lasts" is counted with the learned usual night load (not
+the evening draw of the moment) plus the planned devices, each until its
+window end; the status line about the home battery uses the very same
+calculation, and the `akku_reichweite` attribute shows every assumption.
 
 **Timing**
 - The car is re-planned every 15 minutes on a 30-minute average. Its top-up
