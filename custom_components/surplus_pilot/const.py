@@ -133,8 +133,11 @@ CALIBRATION_MAX_INTERP_MONTHS = 2
 
 DEFAULT_NIGHT_BASE_KW = 0.5
 
-# cheap grid top-up (threshold = percentile of the last days' prices)
-PRICE_ARCHIVE_DAYS = 8
+# cheap grid top-up (threshold = percentile of the last 8 days' prices,
+# never above the same percentile of the last 30 days)
+PRICE_RECENT_DAYS = 8
+PRICE_CAP_DAYS = 30
+PRICE_ARCHIVE_DAYS = PRICE_CAP_DAYS
 PRICE_MIN_SAMPLES_H = 48
 DEFAULT_CHEAP_PERCENTILE = 10
 DEFAULT_CHEAP_TARGET = 80

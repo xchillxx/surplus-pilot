@@ -75,6 +75,8 @@ from .const import (
     DEFAULT_CAR_LIMIT,
     DEFAULT_PV_END_BEFORE_SUNSET_H,
     PRICE_ARCHIVE_DAYS,
+    PRICE_CAP_DAYS,
+    PRICE_RECENT_DAYS,
     PRICE_MIN_SAMPLES_H,
     DEFAULT_SOLAR_OFFSETS,
     DEFAULT_STALE_MINUTES,
@@ -250,8 +252,12 @@ class PilotCoordinator(DataUpdateCoordinator):
         """Fill the price archive from the recorder's hourly statistics of a
         current-price sensor, so the cheap threshold works from day one."""
         ent = self.cfg.get(CONF_PRICE_HISTORY_SENSOR)
-        if not ent or "recorder" not in self.hass.config.components or len(self.store.data["price_archive"]) > 96:
+        if not ent or "recorder" not in self.hass.config.components:
             return
+        arch = self.store.data["price_archive"]
+        oldest = min((t for t in map(dt_util.parse_datetime, arch) if t is not None), default=None)
+        if len(arch) > 96 and oldest is not None and dt_util.now() - oldest >= timedelta(days=PRICE_ARCHIVE_DAYS - 1):
+            return  # archive already reaches back far enough (older gaps are filled with hourly means)
         try:
             from homeassistant.components.recorder import get_instance
             from homeassistant.components.recorder.statistics import statistics_during_period
@@ -268,12 +274,15 @@ class PilotCoordinator(DataUpdateCoordinator):
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Price archive seeding failed", exc_info=True)
             return
-        arch = self.store.data["price_archive"]
+        covered = {dt_util.as_utc(t).replace(minute=0, second=0, microsecond=0)
+                   for t in map(dt_util.parse_datetime, arch) if t is not None}
         for r in rows:
             st, mean = r.get("start"), r.get("mean")
             if st is None or mean is None:
                 continue
             ts = dt_util.utc_from_timestamp(st) if isinstance(st, (int, float)) else st
+            if dt_util.as_utc(ts).replace(minute=0, second=0, microsecond=0) in covered:
+                continue  # hour already known in 15-min prices
             arch.setdefault(dt_util.as_local(ts).isoformat(), float(mean))
         self.store.save()
 
@@ -286,18 +295,17 @@ class PilotCoordinator(DataUpdateCoordinator):
             if t is None:
                 continue
             vals.append(v)
-            by_hour.setdefault(dt_util.as_local(t).hour, []).append(v)
+            if now - t <= timedelta(days=PRICE_RECENT_DAYS):  # estimate for unpublished hours: recent days only
+                by_hour.setdefault(dt_util.as_local(t).hour, []).append(v)
         profile = {h: statistics.median(v) for h, v in by_hour.items()}
-        thr = None
+        thr = recent = cap = None
         enough = len({k[:13] for k in arch}) >= PRICE_MIN_SAMPLES_H
         if enough and vals:
-            vals.sort()
-            pct = float(self.store.data["cheap_percentile"])
-            idx = (len(vals) - 1) * pct / 100.0
-            lo, hi = int(idx), min(int(idx) + 1, len(vals) - 1)
-            thr = vals[lo] + (vals[hi] - vals[lo]) * (idx - lo)
+            thr, recent, cap = P.cheap_thresholds(arch, float(self.store.data["cheap_percentile"]), now,
+                                                  PRICE_RECENT_DAYS, PRICE_CAP_DAYS)
         now_price = next((p.price for p in self._prices if p.start <= now < p.end), None)
-        return {"profile": profile, "threshold": thr, "now": now_price, "samples_h": len({k[:13] for k in arch})}
+        return {"profile": profile, "threshold": thr, "recent": recent, "cap": cap, "now": now_price,
+                "samples_h": len({k[:13] for k in arch})}
 
     async def _backfill_runtime(self) -> None:
         """Today's runtime per device from the recorder when the store has
@@ -879,6 +887,8 @@ class PilotCoordinator(DataUpdateCoordinator):
             "preise_bekannt": len(self._prices),
             "preis_jetzt": self._price_stats.get("now"),
             "billig_schwelle": self._price_stats.get("threshold"),
+            "billig_schwelle_8_tage": self._price_stats.get("recent"),
+            "billig_obergrenze_30_tage": self._price_stats.get("cap"),
             "preis_historie_h": self._price_stats.get("samples_h"),
             "nacht_grundlast_kw": round(self.store.data["night_base_kw"], 2),
         }

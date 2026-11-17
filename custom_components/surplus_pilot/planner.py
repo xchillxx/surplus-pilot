@@ -595,6 +595,60 @@ def _grid_slot_now(inp: Inputs, dep: Departure, uncovered_kwh: float,
     return _in_block(inp, block), block
 
 
+def weighted_percentile(items: list[tuple[float, float]], pct: float) -> float | None:
+    """Percentile of (value, weight) pairs; equal weights give the usual
+    linear interpolation between the sorted values."""
+    items = sorted((v, w) for v, w in items if w > 0)
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0][0]
+    total = sum(w for _, w in items)
+    # position of each value = middle of its weight, scaled to 0..n-1 like the plain percentile
+    pos, acc = [], 0.0
+    for _, w in items:
+        pos.append((acc + w / 2) / total)
+        acc += w
+    lo_p, hi_p = pos[0], pos[-1]
+    target = lo_p + (hi_p - lo_p) * pct / 100.0
+    for i in range(len(items) - 1):
+        if pos[i] <= target <= pos[i + 1]:
+            span = pos[i + 1] - pos[i]
+            f = 0.0 if span <= 0 else (target - pos[i]) / span
+            return items[i][0] + (items[i + 1][0] - items[i][0]) * f
+    return items[-1][0]
+
+
+def cheap_thresholds(archive: dict[str, float], pct: float, now: datetime,
+                     recent_days: float, cap_days: float) -> tuple[float | None, float | None, float | None]:
+    """Cheap threshold = percentile `pct` of the last `recent_days`, but never
+    above the same percentile of the last `cap_days` — after an expensive
+    week the recent value alone would call 32 ct "cheap" (17.11.2026).
+    Every hour weighs the same: an hour stored as four 15-min prices counts
+    each of them a quarter, an hour seeded as one hourly mean counts fully.
+    Returns (threshold, recent value, long-term cap)."""
+    per_hour: dict[str, int] = {}
+    rows: list[tuple[datetime, str, float]] = []
+    for k, v in archive.items():
+        try:
+            t = datetime.fromisoformat(k)
+        except ValueError:
+            continue
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        rows.append((t, k[:13], float(v)))
+        per_hour[k[:13]] = per_hour.get(k[:13], 0) + 1
+
+    def pick(days: float) -> float | None:
+        cut = now - timedelta(days=days)
+        return weighted_percentile([(v, 1.0 / per_hour[h]) for t, h, v in rows if t >= cut], pct)
+
+    recent, cap = pick(recent_days), pick(cap_days)
+    if recent is None:
+        return None, None, cap
+    return (recent if cap is None else min(recent, cap)), recent, cap
+
+
 def _cheap_topup_now(inp: Inputs, dep: Departure | None,
                      surplus: float) -> tuple[bool, float, tuple[datetime, int, float] | None, bool]:
     """Grid top-up while the price is below the cheap threshold — only for

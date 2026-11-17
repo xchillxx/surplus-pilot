@@ -59,7 +59,9 @@ Among equally cheap slots the later ones are taken (a sunnier hour may still
 help), and once there is just enough time left it charges regardless.
 
 **Cheap charging (optional):** while the price is below the cheap threshold
-(default: the cheapest 10 % of the last 8 days) the car is topped up from the
+(default: the cheapest 10 % of the last 8 days, but never above the same
+percentile of the last 30 days — after an expensive week "the cheapest 10 %"
+would otherwise still be dear) the car is topped up from the
 grid up to a target (default 80 %) — but only by the energy the PV forecast
 won't bring before the next departure anyway, so a sunny tomorrow isn't
 wasted. It charges in the cheapest *block* of consecutive published slots before

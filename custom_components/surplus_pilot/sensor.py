@@ -228,6 +228,10 @@ class DeviceSensor(PilotEntity, SensorEntity):
         }
 
 
+
+def _ct(v):
+    return None if v is None else round(v * 100, 2)
+
 class PriceSensor(PilotEntity, SensorEntity):
     """Price in ct/kWh (the archive keeps the source unit, Tibber: EUR/kWh)."""
 
@@ -250,6 +254,12 @@ class PriceSensor(PilotEntity, SensorEntity):
         if self._field != "billig_schwelle":
             return None
         st = self.coordinator.store.data
+        d = self.coordinator.data or {}
         return {"perzentil": st["cheap_percentile"], "billig_laden_bis": st["cheap_target"],
                 "aktiv": st["cheap_enabled"],
-                "historie_stunden": (self.coordinator.data or {}).get("preis_historie_h")}
+                "historie_stunden": d.get("preis_historie_h"),
+                "schwelle_8_tage": _ct(d.get("billig_schwelle_8_tage")),
+                "obergrenze_30_tage": _ct(d.get("billig_obergrenze_30_tage")),
+                "begrenzt_durch_30_tage": (d.get("billig_schwelle_8_tage") is not None
+                                           and d.get("billig_obergrenze_30_tage") is not None
+                                           and d["billig_obergrenze_30_tage"] < d["billig_schwelle_8_tage"])}
