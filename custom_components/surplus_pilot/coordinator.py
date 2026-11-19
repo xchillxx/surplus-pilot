@@ -568,6 +568,7 @@ class PilotCoordinator(DataUpdateCoordinator):
         # ---- car readings
         car_in = None
         car_kw = 0.0
+        car_meas = None
         charging = False
         plugged = None
         if self.car_cfg:
@@ -576,6 +577,7 @@ class PilotCoordinator(DataUpdateCoordinator):
             ch = is_on(self.hass, c.get(CONF_CAR_CHARGING_SENSOR))
             charging = bool(ch) if ch is not None else ((meas or 0.0) > 0.3 or self.car.switch_on())
             car_kw = meas if meas is not None else 0.0
+            car_meas = meas
             # no power reading (none configured, or e.g. an MQTT sensor still
             # empty after a restart): estimate it from the set current, so the
             # car's draw doesn't end up in the base load
@@ -744,6 +746,7 @@ class PilotCoordinator(DataUpdateCoordinator):
             if car_active:
                 await self.car.async_apply(now, True, charging, soc_known, self.store.commands_today)
                 await self.car.async_guard_autostart(now, True, charging)
+                await self.car.async_guard_amps(now, charging, car_meas, self.store.commands_today)
             elif self.car.decision is not None and not self.car.applied:
                 self.car.applied = True
                 self.car.action = ("pausiert" if paused else "nur_beobachten" if not self.active

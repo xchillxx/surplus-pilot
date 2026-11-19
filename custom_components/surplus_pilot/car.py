@@ -10,7 +10,10 @@ Lessons carried over from Smart Car Charger:
   * failed commands back off 1/2/5/10 min;
   * an optional daily command budget for paid vehicle APIs;
   * a charge the car starts by itself right after plug-in is stopped once
-    when the decision is 0 A (unregulated wallboxes do that).
+    when the decision is 0 A (unregulated wallboxes do that);
+  * while charging, the reported current (and the measured power) is checked
+    against the target and the current re-sent: a car can drop a current set
+    right with its start (19.11.2026 live: 6 A set, 16 A / 11 kW drawn).
 """
 from __future__ import annotations
 
@@ -23,6 +26,8 @@ from datetime import datetime, timedelta
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    CAR_AMPS_MAX_FIXES,
+    CAR_AMPS_SETTLE_S,
     CAR_AUTOSTART_GUARD_S,
     CAR_RETRY_DELAYS_MIN,
     CAR_STOP_AFTER_LOW_WINDOWS,
@@ -80,6 +85,10 @@ class CarController:
         self._forced_at: datetime | None = None
         self._autostart_done = True
         self.last_change: datetime | None = None
+        self._target: int | None = None
+        self._amp_fixes = 0
+        self._amp_fix_at: datetime | None = None
+        self._over_since: datetime | None = None
 
     @property
     def min_kw(self) -> float:
@@ -115,6 +124,8 @@ class CarController:
         self.applied = False
         self._retry_at = None
         self._range_tries = 0
+        self._amp_fixes = 0
+        self._over_since = None
         if forced:
             self._forced_at = now
             self._autostart_done = False
@@ -161,6 +172,7 @@ class CarController:
                 target, complete, changed = (d.amps, True, False)
                 if current:
                     target, complete, changed = await self._set_amps(current, d.amps)
+                self._target = target
                 self.action = (f"ampere_{target}" if changed else f"ampere_{target}_unveraendert") + (
                     "_gestartet" if started else "")
                 if started or changed:
@@ -201,6 +213,52 @@ class CarController:
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Stopping the auto-start failed", exc_info=True)
         self._autostart_done = True
+
+    async def async_guard_amps(self, now: datetime, charging: bool, measured_kw: float | None,
+                               commands_today: int) -> None:
+        """Re-send the current when the car charges with another one than set.
+
+        Checked every cycle while charging, from CAR_AMPS_SETTLE_S after the last
+        command: the current entity reports a different value, or the measured
+        power stays well above the target for CAR_AMPS_SETTLE_S (entity stale).
+        At most CAR_AMPS_MAX_FIXES re-sends per decision, within the daily budget."""
+        d = self.decision
+        entity = self.cfg.get(CONF_CAR_CURRENT_ENTITY)
+        target = self._target
+        if (d is None or not self.applied or d.amps <= 0 or not charging or not entity
+                or target is None or target < 1):
+            self._over_since = None
+            return
+        target_kw = target * self.kw_per_a
+        over = measured_kw is not None and measured_kw > target_kw + max(1.5, 0.3 * target_kw)
+        if not over:
+            self._over_since = None
+        elif self._over_since is None:
+            self._over_since = now
+        since = max(t for t in (self.last_change, self._amp_fix_at, d.time) if t is not None)
+        if (now - since).total_seconds() < CAR_AMPS_SETTLE_S or self._amp_fixes >= CAR_AMPS_MAX_FIXES:
+            return
+        max_cmd = int(self.cfg.get(CONF_CAR_MAX_COMMANDS) or 0)
+        if max_cmd and commands_today >= max_cmd:
+            return
+        cur = number(self.hass, entity)
+        reported = round(cur) if cur is not None else None
+        overdraw = over and (now - self._over_since).total_seconds() >= CAR_AMPS_SETTLE_S
+        if not ((reported is not None and reported != target) or overdraw):
+            return
+        self._amp_fixes += 1
+        self._amp_fix_at = now
+        seen = f"{reported} A" if reported is not None and reported != target else f"{measured_kw:.1f} kW"
+        try:
+            await self.hass.services.async_call("number", "set_value", {"entity_id": entity, "value": target},
+                                                blocking=True)
+            self._count_command()
+        except Exception:  # noqa: BLE001 - next cycle / next decision tries again
+            _LOGGER.debug("Re-sending the current failed", exc_info=True)
+            return
+        self._over_since = None
+        self.action = f"ampere_{target}_nachgesetzt"
+        self._log(f"Auto lud mit {seen} statt {target} A — {target} A erneut gesendet")
 
     async def _set_amps(self, entity: str, amps: int) -> tuple[int, bool, bool]:
         def _max() -> float | None:

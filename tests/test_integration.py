@@ -372,6 +372,7 @@ async def test_grid_charging_ends_within_the_quarter_hour(hass: HomeAssistant, f
     for _ in range(7):
         freezer.tick(timedelta(minutes=1))
         set_world(hass, pv=0.5, load=11.6, soc=50, car_soc=74, car_kw=11.0)
+        hass.states.async_set("number.car_amps", 16, {"min": 5, "max": 16})   # the car reports what it got
         async_fire_time_changed(hass, dt_util.utcnow())
         await hass.async_block_till_done()
     assert not co.car.decision.grid

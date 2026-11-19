@@ -158,6 +158,9 @@ Only Home Assistant. Everything else is chosen from your own entities:
   departure targets), charge limit, plugged-in, charging, charging power,
   location — all optional
 - For paid vehicle APIs: a daily command budget
+- While charging, the reported current (and the charging power, if given) is
+  checked against the target; if the car ignored it, the current is sent again
+  (at most twice per decision)
 - A "pause" entity/state: while it matches (e.g. the wallbox runs its own
   PV mode), Surplus Pilot leaves the car alone
 

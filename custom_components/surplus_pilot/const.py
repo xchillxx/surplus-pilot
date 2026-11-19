@@ -79,6 +79,8 @@ CAR_MIN_COVERAGE_MINUTES = 10
 CAR_STOP_AFTER_LOW_WINDOWS = 2
 CAR_AUTOSTART_GUARD_S = 300
 CAR_RETRY_DELAYS_MIN = (1, 2, 5, 10)
+CAR_AMPS_SETTLE_S = 90         # the car's reported current/power counts this long after a command
+CAR_AMPS_MAX_FIXES = 2         # re-sends of the current per decision (paid vehicle APIs)
 
 # ---------------------------------------------------------------- devices (entry.data["devices"])
 CONF_DEVICES = "devices"
