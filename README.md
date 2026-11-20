@@ -26,7 +26,8 @@ and splits the surplus in this order:
    target (e.g. 50 % by 16:30), spread over the PV hours left before it.
    When the surplus is below the car's minimum current, the car is only
    lifted to the minimum (gap from battery/grid) if the PV carries at least
-   half of it *and* the forecast hours that carry the minimum on their own
+   half of it — counting only what is left after the home battery's rate to
+   be full by the PV end (point 2) — *and* the forecast hours that carry the minimum on their own
    won't bring the target — otherwise it waits for those hours.
 2. **Home battery** — enough to be full by the end of the PV day. If the car
    leaves before that, the forecast PV *after* the departure is counted in:

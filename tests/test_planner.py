@@ -288,17 +288,70 @@ def test_obligation_waits_for_real_surplus_instead_of_minimum_from_battery_and_g
     now = datetime(2026, 10, 10, 9, 15, tzinfo=TZ)
     plan = P.make_plan(_oct10(now, pv_kw=1.43, battery_soc=12.0, car_soc=39.0))
     assert plan.car_kw == 0.0 and plan.car_reason == "zu_wenig_ueberschuss"
-    # midday with half the minimum from PV and a forecast too weak for PV-only hours -> minimum
+    # midday with half the minimum from PV (after the battery's deadline rate)
+    # and a forecast too weak for PV-only hours -> minimum
     noon = now.replace(hour=12, minute=0)
-    weak = _oct10(noon, pv_kw=2.7, battery_soc=30.0, car_soc=39.0, scale=0.6)
+    weak = _oct10(noon, pv_kw=3.0, battery_soc=90.0, car_soc=39.0, scale=0.6)
     plan = P.make_plan(weak)
     assert plan.car_reason == "pflicht_minimum" and plan.car_kw == 3.45
+    # the same surplus, but the empty battery takes it until the PV end -> wait
+    plan = P.make_plan(_oct10(noon, pv_kw=3.0, battery_soc=30.0, car_soc=39.0, scale=0.6))
+    assert plan.car_kw == 0.0 and plan.car_reason == "zu_wenig_ueberschuss"
     # the same moment, but the forecast still brings the target in PV-only hours -> wait for them
-    plan = P.make_plan(_oct10(noon, pv_kw=2.7, battery_soc=30.0, car_soc=45.0, scale=1.3))
+    plan = P.make_plan(_oct10(noon, pv_kw=3.0, battery_soc=90.0, car_soc=45.0, scale=1.3))
     assert plan.car_kw == 0.0
     # already charging at the minimum: kept down to 40 % PV share
-    weak = _oct10(noon, pv_kw=2.35, battery_soc=30.0, car_soc=39.0, scale=0.6, current_kw=3.45)
+    assert P.make_plan(_oct10(noon, pv_kw=2.5, battery_soc=90.0, car_soc=39.0, scale=0.6)).car_kw == 0.0
+    weak = _oct10(noon, pv_kw=2.5, battery_soc=90.0, car_soc=39.0, scale=0.6, current_kw=3.45)
     assert P.make_plan(weak).car_reason == "pflicht_minimum"
+
+
+def _nov20(now, pv_kw, battery_soc, base_kw=1.35, pv_end_h=(15, 40), sunset_h=(16, 40)):
+    """20.11.2026 live: day shift Sun 22.11. 04:30 (target 50 %), car at 25 %,
+    Forecast.Solar today ~3-4 kW at midday, tomorrow 35 kWh."""
+    day0 = now.replace(hour=0, minute=0)
+    today = {11: 1.2, 12: 2.8, 13: 3.6, 14: 3.2, 15: 1.9, 16: 0.4}
+    tomorrow = {9: 0.4, 10: 2.0, 11: 3.8, 12: 5.2, 13: 6.0, 14: 6.0, 15: 5.4, 16: 4.2, 17: 2.0}
+    fc = [P.ForecastHour(end=day0 + timedelta(hours=h),
+                         kwh=(today if h < 24 else tomorrow).get(h % 24, 0.0)) for h in range(48)]
+    dep = P.Departure(start=(now + timedelta(days=2)).replace(hour=4, minute=30), target_soc=50.0,
+                      name="Tagschicht", returns=(now + timedelta(days=2)).replace(hour=18, minute=30))
+    car = P.CarInput(present=True, soc=25.0, limit_soc=80.0, capacity_kwh=72.89, efficiency=0.9, min_kw=3.45,
+                     max_kw=11.04)
+    return base_inputs(now, pv_kw=pv_kw, base_kw=base_kw, battery_soc=battery_soc, battery_capacity_kwh=13.8,
+                       car=car, departures=[dep], forecast=fc, solar_start_today=now.replace(hour=9, minute=30),
+                       sunset=now.replace(hour=sunset_h[0], minute=sunset_h[1]),
+                       pv_end=now.replace(hour=pv_end_h[0], minute=pv_end_h[1]))
+
+
+def test_minimum_lift_leaves_the_pv_to_the_home_battery_first():
+    """20.11. live 13:15: PV 3.9 - base 1.35 = 2.6 kW surplus >= half the
+    minimum, but the battery at 37 % needed 3.6 kW until the PV end. Huawei
+    filled it from the PV (37 -> 43 %), the car ran on the grid: 4.3 kWh at
+    ~42 ct, while tomorrow had 35 kWh forecast and a 34.5 ct slot."""
+    now = datetime(2026, 11, 20, 13, 15, tzinfo=TZ)
+    plan = P.make_plan(_nov20(now, pv_kw=3.9, battery_soc=37.0))
+    assert plan.battery_target_kw > 3.0
+    assert plan.car_kw == 0.0 and plan.car_reason == "zu_wenig_ueberschuss"
+    # battery nearly full: the same surplus really goes to the car -> minimum as before
+    plan = P.make_plan(_nov20(now, pv_kw=3.9, battery_soc=95.0))
+    assert plan.car_reason == "pflicht_minimum" and plan.car_kw == 3.45
+
+
+def test_minimum_lift_unchanged_on_a_long_summer_day():
+    """Summer: many hours until the PV end spread the battery's need thin,
+    so the lift works as before (no evening export from a car that waited
+    for a full battery)."""
+    now = datetime(2026, 6, 20, 10, 0, tzinfo=TZ)
+    inp = _nov20(now, pv_kw=3.9, battery_soc=40.0, pv_end_h=(20, 30), sunset_h=(21, 30))
+    inp.forecast = [replace_fc(r, 0.4) for r in inp.forecast]  # weak day: PV-only hours won't reach the target
+    plan = P.make_plan(inp)
+    assert plan.battery_target_kw < 1.0
+    assert plan.car_reason == "pflicht_minimum" and plan.car_kw == 3.45
+
+
+def replace_fc(r, scale):
+    return P.ForecastHour(end=r.end, kwh=r.kwh * scale)
 
 
 def test_cheap_topup_waits_for_a_cheaper_slot_without_pv():

@@ -911,7 +911,12 @@ def _make_plan(inp: Inputs) -> Plan:
     car_kw = car_must + topup if car_ok else 0.0
     if car_ok:
         if car_kw < car.min_kw:
-            if must_kw > MUST_MIN_SURPLUS_KW and car_must > 0 and _lift_to_min(inp, dep, need_kwh, surplus):
+            # the PV share counts only what is left after the home battery's
+            # deadline rate: Huawei fills the battery from the PV, the car then
+            # draws from the grid (20.11. live: 13:15, 2.6 kW surplus, battery
+            # 37 % needing 3.6 kW until PV end -> car 4.3 kWh from the grid at 42 ct)
+            if must_kw > MUST_MIN_SURPLUS_KW and car_must > 0 and _lift_to_min(inp, dep, need_kwh,
+                                                                                 surplus - target_b):
                 car_kw, car_reason = car.min_kw, "pflicht_minimum"  # battery/grid fill the gap
             else:
                 car_kw, car_reason = 0.0, "billig_akku" if cheap_waits else "zu_wenig_ueberschuss"
@@ -927,7 +932,8 @@ def _make_plan(inp: Inputs) -> Plan:
 def _lift_to_min(inp: Inputs, dep: Departure, need_kwh: float, surplus: float) -> bool:
     """Raise the car to its minimum current for the departure target, the
     gap coming from the home battery or the grid? Only when the PV carries a
-    real share of it right now AND the hours whose surplus alone carries the
+    real share of it right now (`surplus` = what is left after the home
+    battery's deadline rate) AND the hours whose surplus alone carries the
     minimum won't bring the target anyway (10.10. live: 09:15, 0.65 kW
     surplus, battery at 12 % -> car at 3.45 kW, 2.8 kW from the battery and
     the grid at 22.7 ct while the midday was forecast at 3.5+ kW)."""
